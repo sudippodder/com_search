@@ -4,3 +4,4 @@ requests>=2.31.0
 beautifulsoup4
 huggingface_hub
 pandas>=2.2.2
+textblob
