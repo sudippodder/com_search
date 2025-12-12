@@ -1,6 +1,6 @@
 streamlit
-python-dotenv
-requests
+python-dotenv>=1.0.0
+requests>=2.31.0
 beautifulsoup4
 huggingface_hub
-pandas
+pandas>=2.2.2
