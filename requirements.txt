@@ -5,3 +5,4 @@ beautifulsoup4
 huggingface_hub
 pandas>=2.2.2
 textblob
+werkzeug>=3.0.0
