@@ -2,5 +2,5 @@ streamlit
 python-dotenv
 requests
 beautifulsoup4
-openai
+huggingface_hub
 pandas
