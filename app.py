@@ -7,7 +7,7 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from openai import OpenAI
+#from openai import OpenAI
 import streamlit as st
 import re
 import sqlite3
