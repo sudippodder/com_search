@@ -20,15 +20,15 @@ DB_PATH = "company_contacts.db"
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+#OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 # Default admin credentials (can be set in .env)
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is missing in .env")
+# if not OPENAI_API_KEY:
+#     raise RuntimeError("OPENAI_API_KEY is missing in .env")
 if not SERPER_API_KEY:
     raise RuntimeError("SERPER_API_KEY is missing in .env")
 
