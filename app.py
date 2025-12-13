@@ -378,6 +378,19 @@ def build_company_records(query: str, num_results: int = 5, sleep_sec: float = 2
         merged_phones = sorted(info_phones.union(phones_bs))
         info["emails"] = merged_emails
         info["phones"] = merged_phones
+        
+         # === FIX APPLIED HERE: Standardize 'address' to a string ===
+        raw_address = info.get("address")
+        final_address = ""
+        if isinstance(raw_address, list):
+            # If the LLM returned a list of addresses, join them into one string
+            final_address = " / ".join([str(a) for a in raw_address if a])
+        elif raw_address is not None:
+            # If it's a string or other scalar, convert to string
+            final_address = str(raw_address)
+        # ==========================================================
+        
+        
         record = {
             "query": query,
             "title": title,
@@ -385,7 +398,7 @@ def build_company_records(query: str, num_results: int = 5, sleep_sec: float = 2
             "website": info.get("website", url),
             "emails": ", ".join(info.get("emails", [])),
             "phones": ", ".join(info.get("phones", [])),
-            "address": info.get("address"),
+            "address": final_address,
         }
         st.json(info)
         st.markdown("---")
