@@ -33,7 +33,8 @@ if not SERPER_API_KEY:
     raise RuntimeError("SERPER_API_KEY is missing in .env")
 
 API_TOKEN = os.getenv("HF_TOKEN")
-TEXT_CLASSIFICATION_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+#TEXT_CLASSIFICATION_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+TEXT_CLASSIFICATION_MODEL = "HuggingFaceTB/SmolLM3-3B"
 client = InferenceClient(model=TEXT_CLASSIFICATION_MODEL, token=API_TOKEN)
 
 # ---------- Database initialization ----------
