@@ -1,0 +1,7 @@
+.venv/Scripts/activate
+
+com_search
+
+
+
+Search Query/ company details from google > website url > extract emails, phone numbers, address, whatsapp number if available from the website

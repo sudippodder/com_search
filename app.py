@@ -34,7 +34,7 @@ if not SERPER_API_KEY:
 
 API_TOKEN = os.getenv("HF_TOKEN")
 #TEXT_CLASSIFICATION_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
-TEXT_CLASSIFICATION_MODEL = "HuggingFaceTB/SmolLM3-3B"
+TEXT_CLASSIFICATION_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
 client = InferenceClient(model=TEXT_CLASSIFICATION_MODEL, token=API_TOKEN)
 
 # ---------- Database initialization ----------
@@ -189,7 +189,9 @@ def extract_links(html: str, base_url: str):
     soup = BeautifulSoup(html, "html.parser")
     links = set()
     for a in soup.find_all("a", href=True):
-        href_raw = a["href"]
+        href_raw = a["href"].strip()
+        if not href_raw or href_raw.startswith("#") or any(href_raw.lower().startswith(proto) for proto in ["mailto:", "tel:", "javascript:"]):
+            continue
         href = href_raw.lower()
         text = (a.get_text() or "").lower()
         if any(k in href for k in ["contact", "about", "team"]) or any(k in text for k in ["contact", "about", "team"]):
