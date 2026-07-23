@@ -1,47 +1,43 @@
-# updated_app_with_auth.py
 import os
-from huggingface_hub import InferenceClient
-import json
 import time
 import requests
 import pandas as pd
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-#from openai import OpenAI
 import streamlit as st
-import re
 import sqlite3
 from datetime import datetime
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse
 from werkzeug.security import generate_password_hash, check_password_hash
+import threading
+import logging
+import re
 
 # ---------- Load env & init client ----------
 DB_PATH = "company_contacts.db"
-
 load_dotenv()
 
-#OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 # Default admin credentials (can be set in .env)
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
 
-# if not OPENAI_API_KEY:
-#     raise RuntimeError("OPENAI_API_KEY is missing in .env")
 if not SERPER_API_KEY:
     raise RuntimeError("SERPER_API_KEY is missing in .env")
 
-API_TOKEN = os.getenv("HF_TOKEN")
-#TEXT_CLASSIFICATION_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
-TEXT_CLASSIFICATION_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
-client = InferenceClient(model=TEXT_CLASSIFICATION_MODEL, token=API_TOKEN)
+# ---------- Logging Setup ----------
+logging.basicConfig(
+    filename='app_search.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # ---------- Database initialization ----------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    # contacts table
+    # legacy contacts table (kept for safety, not used actively)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS company_contacts (
@@ -58,7 +54,21 @@ def init_db():
         )
         """
     )
-    # users table (for authentication)
+    # new simplified links table
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS website_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            website TEXT,
+            website_normalized TEXT UNIQUE,
+            category TEXT,
+            location TEXT,
+            page_no INTEGER,
+            created_at TEXT
+        )
+        """
+    )
+    # users table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -69,13 +79,92 @@ def init_db():
         )
         """
     )
+    # categories table
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE
+        )
+        """
+    )
+    # locations table
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE
+        )
+        """
+    )
+    # app_settings table
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
+    # search_queue table
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS search_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT,
+            location TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT
+        )
+        """
+    )
+    
+    # Initialize default settings if not exists
+    cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('interval_minutes', '20')")
+    cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('search_pages', '3')")
+    cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('is_running', 'false')")
+    
     conn.commit()
     conn.close()
 
+def execute_db(query, args=()):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        cur.execute(query, args)
+        conn.commit()
+        return cur
+    except Exception as e:
+        logger.error(f"DB Error: {e}")
+        return None
+    finally:
+        conn.close()
+
+def fetch_db(query, args=()):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(query, args)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def fetch_db_one(query, args=()):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(query, args)
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def get_setting(key, default=""):
+    row = fetch_db_one("SELECT value FROM app_settings WHERE key = ?", (key,))
+    return row[0] if row else default
+
+def update_setting(key, value):
+    execute_db("UPDATE app_settings SET value = ? WHERE key = ?", (str(value), key))
+
+# --- Authentication Helpers ---
 def create_user(username: str, password: str) -> dict:
-    """
-    Create a user with hashed password. Returns dict with id/username on success or error.
-    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     try:
@@ -95,11 +184,7 @@ def create_user(username: str, password: str) -> dict:
         conn.close()
 
 def get_user_by_username(username: str):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT id, username, password_hash FROM users WHERE username = ?", (username,))
-    row = cur.fetchone()
-    conn.close()
+    row = fetch_db_one("SELECT id, username, password_hash FROM users WHERE username = ?", (username,))
     if not row:
         return None
     return {"id": row[0], "username": row[1], "password_hash": row[2]}
@@ -113,186 +198,72 @@ def verify_user(username: str, password: str):
     return {"ok": False, "error": "invalid_password"}
 
 def ensure_default_admin():
-    """
-    Create default admin user if not present, using ADMIN_USER / ADMIN_PASS env vars.
-    """
     existing = get_user_by_username(ADMIN_USER)
     if existing:
         return existing
-    res = create_user(ADMIN_USER, ADMIN_PASS)
-    return res
+    return create_user(ADMIN_USER, ADMIN_PASS)
 
-# ---------- existing helper functions (unchanged) ----------
-def search_companies(query: str, total_results: int = 50, page_size: int = 10):
-    url = "https://google.serper.dev/search"
-    headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
-    results = []
-    page = 1
-    while len(results) < total_results:
-        payload = {"q": query, "num": page_size, "page": page}
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        organic = data.get("organic", []) or []
-        if not organic:
-            break
-        for item in organic:
-            link = item.get("link")
-            title = item.get("title")
-            if link:
-                results.append({"title": title, "link": link})
-                if len(results) >= total_results:
-                    break
-        page += 1
-    return results
-
-def extract_contacts_from_html(html: str):
-    soup = BeautifulSoup(html, "html.parser")
-    emails = set()
-    phones = set()
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        if href.lower().startswith("mailto:"):
-            unquoted_href = unquote(href)
-            email_with_params = unquoted_href.split("mailto:", 1)[1].split("?", 1)[0]
-            email = email_with_params.strip()
-            if email and "@" in email:
-                emails.add(email.lower())
-        if href.lower().startswith("tel:"):
-            phone = href.split("tel:", 1)[1].strip()
-            phone = unquote(phone)
-            phone = phone.replace("%20", " ")
-            if phone:
-                phones.add(phone)
-    full_text = soup.get_text(separator=" ", strip=True)
-    full_text = re.sub(r"\s+", " ", full_text)
-    email_pattern = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
-    phone_pattern = r"\+?\d[\d\s\-()]{6,}"
-    for email in re.findall(email_pattern, full_text):
-        emails.add(email.strip().lower())
-    for phone in re.findall(phone_pattern, full_text):
-        phones.add(phone.strip())
-    clean_emails = sorted(list({e.replace(" ", "") for e in emails if e}))
-    clean_phones = sorted(list({p for p in phones if p}))
-    return clean_emails, clean_phones
-
-def fetch_page(url: str) -> str:
-    try:
-        resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        return resp.text
-    except Exception as e:
-        print(f"Error fetching {url}: {e}")
-        return ""
-
-def extract_links(html: str, base_url: str):
-    soup = BeautifulSoup(html, "html.parser")
-    links = set()
-    for a in soup.find_all("a", href=True):
-        href_raw = a["href"].strip()
-        if not href_raw or href_raw.startswith("#") or any(href_raw.lower().startswith(proto) for proto in ["mailto:", "tel:", "javascript:"]):
-            continue
-        href = href_raw.lower()
-        text = (a.get_text() or "").lower()
-        if any(k in href for k in ["contact", "about", "team"]) or any(k in text for k in ["contact", "about", "team"]):
-            if href_raw.startswith("http"):
-                links.add(href_raw)
-            else:
-                if href_raw.startswith("/"):
-                    links.add(base_url.rstrip("/") + href_raw)
-                else:
-                    links.add(base_url.rstrip("/") + "/" + href_raw)
-    return list(links)
-
-def llm_extract_company_info(website_url: str, page_text: str) -> dict:
-    prompt = f"""
-You are a data extraction assistant.
-
-Extract structured contact info from the following HTML of a company's website.
-HTML may contain Elementor/WordPress blocks, <ul><li> lists, <a href="mailto:..."> and <a href="tel:..."> tags.
-
-Return ONLY valid JSON with exactly these keys:
-- company_name
-- website
-- emails
-- phones
-- address
-
-If data is missing, use null or [].
-
-Website URL: {website_url}
-
-HTML:
-\"\"\"{page_text[:15000]}\"\"\" 
-"""
-    completion = client.chat.completions.create(
-        model=TEXT_CLASSIFICATION_MODEL,
-        messages=[
-            {"role": "system", "content": "You extract structured data and respond ONLY in JSON."},
-            {"role": "user", "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-    )
-    json_str = completion.choices[0].message.content
-    try:
-        data = json.loads(json_str)
-    except Exception:
-        data = {
-            "company_name": None,
-            "website": website_url,
-            "emails": [],
-            "phones": [],
-            "address": None,
-            "raw": json_str,
-        }
-    data.setdefault("company_name", None)
-    data.setdefault("website", website_url)
-    data.setdefault("emails", [])
-    if data["emails"] is None:
-        data["emails"] = []
-    data.setdefault("phones", [])
-    if data["phones"] is None:
-        data["phones"] = []
-    data.setdefault("address", None)
-    return data
-
-def search_companies_paged(query: str, total_results: int = 30, page_size: int = 10):
-    url = "https://google.serper.dev/search"
-    headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
-    results = []
-    page = 1
-    while len(results) < total_results:
-        payload = {"q": query, "num": page_size, "page": page}
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        organic = data.get("organic", []) or []
-        if not organic:
-            break
-        for item in organic:
-            link = item.get("link")
-            title = item.get("title")
-            if link:
-                results.append({"title": title, "link": link})
-                if len(results) >= total_results:
-                    break
-        page += 1
-    return results
-
+# ---------- Lightweight Link Extraction ----------
 def normalize_url(url: str) -> str:
     if not url:
         return ""
     try:
-        parsed = urlparse(url.strip())
-        scheme = parsed.scheme.lower() or "https"
+        url_strip = url.strip()
+        if not url_strip.startswith("http"):
+            url_strip = "https://" + url_strip
+        parsed = urlparse(url_strip)
         netloc = parsed.netloc.lower()
-        path = parsed.path.rstrip("/")
-        normalized = f"{scheme}://{netloc}{path}"
-        return normalized
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        return netloc
     except Exception:
         return url.strip().lower()
 
-def save_records_to_db(records):
+def search_companies_paged(query: str, target_pages: int = 3, ui_mode=True):
+    """Fetches purely links and records which Serper page they came from."""
+    url = "https://google.serper.dev/search"
+    headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
+    results = []
+    page_size = 10
+    
+    for page in range(1, target_pages + 1):
+        payload = {"q": query, "num": page_size, "page": page}
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            organic = data.get("organic", []) or []
+            if not organic:
+                break
+            for item in organic:
+                link = item.get("link")
+                if link:
+                    results.append({"link": link, "page_no": page})
+        except Exception as e:
+            msg = f"Search API error on page {page}: {e}"
+            if ui_mode: st.error(msg)
+            logger.error(msg)
+            break
+    return results
+
+def build_website_links(category: str, location: str, target_pages: int = 3, ui_mode: bool = True):
+    query = f"{category} in {location}"
+    if ui_mode: st.markdown(f"## Searching: '{query}' across {target_pages} pages")
+    
+    search_results = search_companies_paged(query, target_pages=target_pages, ui_mode=ui_mode)
+    if ui_mode: st.write(f"Got {len(search_results)} links from API")
+    
+    records = []
+    for r in search_results:
+        records.append({
+            "website": r["link"],
+            "category": category,
+            "location": location,
+            "page_no": r["page_no"]
+        })
+    return records
+
+def save_links_to_db(records):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     inserted = 0
@@ -300,123 +271,101 @@ def save_records_to_db(records):
     for r in records:
         website = r.get("website") or ""
         normalized = normalize_url(website)
-        query = r.get("query") or ""
-        title = r.get("title") or ""
-        company_name = r.get("company_name") or ""
-        emails = r.get("emails") or ""
-        phones = r.get("phones") or ""
-        address = r.get("address") or ""
+        website = normalized # Only store domain name
+        category = r.get("category") or ""
+        location = r.get("location") or ""
+        page_no = r.get("page_no") or 1
+        
         try:
             cur.execute(
                 """
-                INSERT OR IGNORE INTO company_contacts
-                (query, title, company_name, website, website_normalized, emails, phones, address, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO website_links
+                (website, website_normalized, category, location, page_no, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    query,
-                    title,
-                    company_name,
-                    website,
-                    normalized,
-                    emails,
-                    phones,
-                    address,
-                    datetime.utcnow().isoformat(),
-                ),
+                (website, normalized, category, location, page_no, datetime.utcnow().isoformat()),
             )
             if cur.rowcount == 0:
                 skipped += 1
             else:
                 inserted += 1
         except Exception as e:
-            print("DB insert error:", e)
+            logger.error(f"DB insert error: {e}")
             skipped += 1
     conn.commit()
     conn.close()
     return inserted, skipped
 
-def load_all_from_db():
+def load_links_from_db():
     conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query("SELECT * FROM company_contacts ORDER BY id DESC", conn)
+    df = pd.read_sql_query("SELECT id, website, category, location, page_no, created_at FROM website_links ORDER BY id DESC", conn)
     conn.close()
     return df
 
-def build_company_records(query: str, num_results: int = 5, sleep_sec: float = 2.0):
-    st.markdown(f"## Searching for: {num_results} companies matching '{query}'")
-    search_results = search_companies_paged(query, total_results=num_results)
-    st.write(f"Got {len(search_results)} search results from API")
-    records = []
-    for i, r in enumerate(search_results, start=1):
-        url = r["link"]
-        title = r["title"] or ""
-        st.write(f"### {i}. {title}")
-        st.write(url)
-        main_html = fetch_page(url)
-        #st.markdown(f"Fetching main page...{main_html}---{url}")
-        if not main_html:
-            st.warning("Could not fetch main page.")
-            continue
-        content = main_html
-        extra_links = extract_links(main_html, url)
+# ---------- Background Thread Logic ----------
+def background_search_worker():
+    while True:
+        try:
+            is_running = get_setting('is_running') == 'true'
+            if not is_running:
+                time.sleep(10)
+                continue
+                
+            # Check for pending items
+            next_task = fetch_db_one("SELECT id, category, location FROM search_queue WHERE status = 'pending' ORDER BY id ASC LIMIT 1")
+            
+            if next_task:
+                task_id, category, location = next_task
+                
+                # Mark as processing
+                execute_db("UPDATE search_queue SET status = 'processing' WHERE id = ?", (task_id,))
+                logger.info(f"Background worker starting: {category} in {location}")
+                
+                # Get settings
+                pages = int(get_setting('search_pages', '3'))
+                
+                records = build_website_links(category, location, target_pages=pages, ui_mode=False)
+                
+                if records:
+                    inserted, skipped = save_links_to_db(records)
+                    logger.info(f"Completed {category} in {location}. Inserted: {inserted}, Skipped: {skipped}")
+                else:
+                    logger.info(f"'{category} in {location}' returned no valid records.")
+                    
+                # Mark as completed
+                execute_db("UPDATE search_queue SET status = 'completed' WHERE id = ?", (task_id,))
+                
+                # Check if queue is empty now
+                remaining = fetch_db_one("SELECT COUNT(*) FROM search_queue WHERE status = 'pending'")
+                if remaining and remaining[0] == 0:
+                    logger.info("All category searches are completed. Stopping process.")
+                    update_setting('is_running', 'false')
+                    
+                # Sleep for configured interval
+                interval = int(get_setting('interval_minutes', '20'))
+                logger.info(f"Sleeping for {interval} minutes before next task.")
+                time.sleep(interval * 60)
+            else:
+                # No tasks but running? Stop it.
+                update_setting('is_running', 'false')
+                time.sleep(10)
+                
+        except Exception as e:
+            logger.error(f"Background worker error: {e}")
+            time.sleep(60)
 
-        st.caption(f"Found {len(extra_links)} contact/about-like pages.")
-        for idx, link in enumerate(extra_links[:5], start=1):
-            st.caption(f"Fetching extra page {idx}: {link}")
-            sub_html = fetch_page(link)
-            content += "\n\n" + sub_html
-            time.sleep(0.8)  # be nice to servers
-
-        # LLM extraction
-        with st.spinner("Extracting contact details with AI..."):
-            info = llm_extract_company_info(url, content)
-        # Normalize LLM results and merge
-        llm_emails_list = info.get("emails")
-        llm_emails_list = llm_emails_list if isinstance(llm_emails_list, list) else []
-        llm_emails = [str(e) for e in llm_emails_list if e is not None]
-        info_emails = set(llm_emails)
-        llm_phones_list = info.get("phones")
-        llm_phones_list = llm_phones_list if isinstance(llm_phones_list, list) else []
-        llm_phones = [str(p) for p in llm_phones_list if p is not None]
-        info_phones = set(llm_phones)
-        merged_emails = sorted(info_emails.union(emails_bs))
-        merged_phones = sorted(info_phones.union(phones_bs))
-        info["emails"] = merged_emails
-        info["phones"] = merged_phones
-        
-         # === FIX APPLIED HERE: Standardize 'address' to a string ===
-        raw_address = info.get("address")
-        final_address = ""
-        if isinstance(raw_address, list):
-            # If the LLM returned a list of addresses, join them into one string
-            final_address = " / ".join([str(a) for a in raw_address if a])
-        elif raw_address is not None:
-            # If it's a string or other scalar, convert to string
-            final_address = str(raw_address)
-        # ==========================================================
-        
-        
-        record = {
-            "query": query,
-            "title": title,
-            "company_name": info.get("company_name"),
-            "website": info.get("website", url),
-            "emails": ", ".join(info.get("emails", [])),
-            "phones": ", ".join(info.get("phones", [])),
-            "address": final_address,
-        }
-        st.json(info)
-        st.markdown("---")
-        records.append(record)
-        time.sleep(sleep_sec)
-    return records
+# Start background thread only once
+if 'bg_thread_started' not in st.session_state:
+    thread = threading.Thread(target=background_search_worker, daemon=True)
+    thread.start()
+    st.session_state['bg_thread_started'] = True
 
 # ---------- App UI with Auth ----------
-st.set_page_config(page_title="AI Company Contact Finder", layout="wide")
+st.set_page_config(page_title="Website Link Finder", layout="wide")
 init_db()
 ensure_default_admin()
 
-# ---------- Sidebar: Authentication ----------
+# ---------- Sidebar: Authentication & Navigation ----------
 with st.sidebar:
     st.header("🔐 Account")
     if "user_info" in st.session_state and st.session_state.get("user_info"):
@@ -425,8 +374,13 @@ with st.sidebar:
         if st.button("Logout"):
             st.session_state.pop("user_info", None)
             st.rerun()
+            
+        st.markdown("---")
+        st.header("Navigation")
+        page = st.radio("Go to", ["Manual Search", "Automated Search", "Search List", "Logs"])
     else:
-        auth_tab = st.radio("Action", ("Login"))
+        page = "Login"
+        auth_tab = st.radio("Action", ["Login", "Register"])
         if auth_tab == "Login":
             login_user = st.text_input("Username", key="login_user")
             login_pass = st.text_input("Password", type="password", key="login_pass")
@@ -458,60 +412,240 @@ with st.sidebar:
 
 # ---------- Main content: protected ----------
 if "user_info" not in st.session_state or not st.session_state.get("user_info"):
-    st.title("AI Company Contact Finder")
-    st.write(
-        "Please log in (sidebar) to access the search and extraction features."
-    )
+    st.title("Website Link Finder")
+    st.write("Please log in (sidebar) to access the features.")
     st.stop()
 
-# From here on the user is authenticated
-st.title("🏢 AI Company Contact Finder")
-st.write(
-    "Enter a search query like **'real estate companies in Dubai'** and the agent "
-    "will try to find websites and extract emails, phone numbers, and addresses."
-)
-
-with st.sidebar:
-    st.header("Settings")
-    default_query = "real estate company in Dubai"
-    query = st.text_input("Search query", value=default_query)
-    num_results = st.sidebar.slider("Number of search results to process", 1, 100, 20)
-    run_button = st.button("Run Search")
-    st.markdown(f"---{num_results}")
-
-if run_button:
-    if not query.strip():
-        st.error("Please enter a query.")
-    else:
-        with st.spinner("Running agent..."):
-            records = build_company_records(query, num_results=num_results,sleep_sec=2.0)
-        if not records:
-            st.warning("No records extracted. Try another query or increase results.")
+if page == "Manual Search":
+    st.title("🏢 Manual Search")
+    st.write("Run a one-off query and instantly extract the website links.")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        manual_cat = st.text_input("Category (e.g. SEO Agency)", value="SEO Agency")
+    with col2:
+        manual_loc = st.text_input("Location (e.g. Dubai)", value="Dubai")
+        
+    num_pages = st.slider("Number of pages to search (10 results per page)", 1, 10, 3)
+    run_button = st.button("Run Manual Search")
+    
+    if run_button:
+        if not manual_cat.strip() or not manual_loc.strip():
+            st.error("Please enter both a Category and Location.")
         else:
-            df = pd.DataFrame(records)
-            st.session_state["records_df"] = df
-            inserted, skipped = save_records_to_db(records)
-            st.success(f"Saved to database. Inserted: {inserted}, skipped (duplicates): {skipped}")
-else:
-    st.info("Configure your query in the sidebar and click **Run Search** to start.")
+            with st.spinner("Extracting links..."):
+                records = build_website_links(manual_cat, manual_loc, target_pages=num_pages, ui_mode=True)
+            if not records:
+                st.warning("No links extracted. Try another query or increase results.")
+            else:
+                df = pd.DataFrame(records)
+                st.session_state["records_df"] = df
+                inserted, skipped = save_links_to_db(records)
+                st.success(f"Saved to database. Inserted: {inserted} new, skipped (duplicates): {skipped}")
+                
+    if "records_df" in st.session_state:
+        st.subheader("📋 Last Manual Search Results")
+        st.dataframe(st.session_state["records_df"], use_container_width=True)
 
-# ---------- Pagination display ----------
-if "records_df" in st.session_state:
-    df = st.session_state["records_df"]
-    st.subheader("📋 Extracted Companies (Paginated)")
-    total_rows = len(df)
-    page_size = st.sidebar.number_input("Rows per page", min_value=5, max_value=100, value=10, step=5)
-    total_pages = (total_rows + page_size - 1) // page_size
-    page = st.sidebar.number_input("Page number", min_value=1, max_value=max(1, total_pages), value=1, step=1)
-    start_idx = (page - 1) * page_size
-    end_idx = start_idx + page_size
-    st.caption(f"Showing {start_idx + 1}–{min(end_idx, total_rows)} of {total_rows} records")
-    st.dataframe(df.iloc[start_idx:end_idx], use_container_width=True)
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button(label="⬇️ Download ALL results as CSV", data=csv, file_name="company_contacts.csv", mime="text/csv")
-else:
-    st.info("Run a search to see results here.")
+elif page == "Automated Search":
+    st.title("⚙️ Automated Background Search")
+    
+    # 1. Categories
+    st.subheader("1. Categories")
+    col1, col2 = st.columns(2)
+    with col1:
+        new_cats = st.text_area("Add Categories (comma or newline separated)")
+        if st.button("Add Categories"):
+            if new_cats:
+                parts = re.split(r'[,\n]', new_cats)
+                for part in parts:
+                    val = part.strip()
+                    if val:
+                        execute_db("INSERT OR IGNORE INTO categories (name) VALUES (?)", (val,))
+                st.rerun()
+    with col2:
+        cats = fetch_db("SELECT id, name FROM categories")
+        if cats:
+            cat_options = {cname: cid for cid, cname in cats}
+            selected_cat_name = st.selectbox("Select Category to Edit/Delete", list(cat_options.keys()))
+            if selected_cat_name:
+                selected_cat_id = cat_options[selected_cat_name]
+                edit_cat_val = st.text_input("Edit Category", value=selected_cat_name, key="edit_cat")
+                col2_1, col2_2 = st.columns(2)
+                if col2_1.button("Update Category"):
+                    if edit_cat_val and edit_cat_val.strip() != selected_cat_name:
+                        execute_db("UPDATE categories SET name=? WHERE id=?", (edit_cat_val.strip(), selected_cat_id))
+                        st.rerun()
+                if col2_2.button("❌ Delete Category"):
+                    execute_db("DELETE FROM categories WHERE id=?", (selected_cat_id,))
+                    st.rerun()
+        else:
+            st.write("No categories yet.")
 
-with st.expander("📚 View data saved in DB"):
-    db_df = load_all_from_db()
-    st.dataframe(db_df, use_container_width=True)
+    st.markdown("---")
+    # 2. Locations
+    st.subheader("2. Locations")
+    col3, col4 = st.columns(2)
+    with col3:
+        new_locs = st.text_area("Add Locations (comma or newline separated)")
+        if st.button("Add Locations"):
+            if new_locs:
+                parts = re.split(r'[,\n]', new_locs)
+                for part in parts:
+                    val = part.strip()
+                    if val:
+                        execute_db("INSERT OR IGNORE INTO locations (name) VALUES (?)", (val,))
+                st.rerun()
+    with col4:
+        locs = fetch_db("SELECT id, name FROM locations")
+        if locs:
+            loc_options = {lname: lid for lid, lname in locs}
+            selected_loc_name = st.selectbox("Select Location to Edit/Delete", list(loc_options.keys()))
+            if selected_loc_name:
+                selected_loc_id = loc_options[selected_loc_name]
+                edit_loc_val = st.text_input("Edit Location", value=selected_loc_name, key="edit_loc")
+                col4_1, col4_2 = st.columns(2)
+                if col4_1.button("Update Location"):
+                    if edit_loc_val and edit_loc_val.strip() != selected_loc_name:
+                        execute_db("UPDATE locations SET name=? WHERE id=?", (edit_loc_val.strip(), selected_loc_id))
+                        st.rerun()
+                if col4_2.button("❌ Delete Location"):
+                    execute_db("DELETE FROM locations WHERE id=?", (selected_loc_id,))
+                    st.rerun()
+        else:
+            st.write("No locations yet.")
+
+    st.markdown("---")
+    # 3. Settings & Queue Control
+    st.subheader("3. Settings & Queue Control")
+    current_interval = int(get_setting("interval_minutes", "20"))
+    current_pages = int(get_setting("search_pages", "3"))
+    
+    interval = st.number_input("Interval between searches (minutes)", min_value=1, value=current_interval)
+    pages = st.number_input("Pages to search per category (1 page = 10 results)", min_value=1, max_value=20, value=current_pages)
+    
+    if st.button("Save Settings"):
+        update_setting("interval_minutes", interval)
+        update_setting("search_pages", pages)
+        st.success("Settings saved!")
+        
+    st.markdown("---")
+    
+    st.subheader("Queue Status")
+    
+    col_q1, col_q2 = st.columns(2)
+    with col_q1:
+        if st.button("Generate Queue from Categories & Locations"):
+            cats = fetch_db("SELECT name FROM categories")
+            locs = fetch_db("SELECT name FROM locations")
+            if not cats or not locs:
+                st.error("Please add at least one category and one location.")
+            else:
+                execute_db("DELETE FROM search_queue WHERE status = 'pending'") # clear old pending
+                for c in cats:
+                    for l in locs:
+                        execute_db("INSERT INTO search_queue (category, location, created_at) VALUES (?, ?, ?)", (c[0], l[0], datetime.utcnow().isoformat()))
+                st.success("Queue generated successfully!")
+                st.rerun()
+    with col_q2:
+        if st.button("Clear Queue"):
+            execute_db("DELETE FROM search_queue")
+            st.success("Queue cleared.")
+            st.rerun()
+
+    queue_data = fetch_db("SELECT id, category, location, status FROM search_queue ORDER BY id")
+    if queue_data:
+        df_queue = pd.DataFrame(queue_data, columns=["ID", "Category", "Location", "Status"])
+        st.dataframe(df_queue, use_container_width=True)
+    else:
+        st.info("Queue is empty.")
+
+    is_running = get_setting("is_running") == "true"
+    if is_running:
+        st.success("🟢 Automated Search is currently RUNNING")
+        if st.button("Stop Automated Search"):
+            update_setting("is_running", "false")
+            st.rerun()
+    else:
+        st.warning("🔴 Automated Search is STOPPED")
+        if st.button("Start Automated Search"):
+            update_setting("is_running", "true")
+            st.rerun()
+
+elif page == "Search List":
+    st.title("📚 Search List")
+    st.write("All automatically and manually extracted website links.")
+    
+    db_df = load_links_from_db()
+    
+    if db_df.empty:
+        st.info("No records found in database.")
+    else:
+        # Rename columns to look nicer in UI
+        display_df = db_df.rename(columns={
+            "id": "ID",
+            "website": "Website Link",
+            "category": "Category",
+            "location": "Location",
+            "page_no": "Search Page Number",
+            "created_at": "Insert Data Time"
+        })
+        
+        total_rows = len(display_df)
+        page_size = st.number_input("Rows per page", min_value=5, max_value=500, value=50, step=10)
+        total_pages = (total_rows + page_size - 1) // page_size
+        page_no = st.number_input("Page view number", min_value=1, max_value=max(1, total_pages), value=1, step=1)
+        start_idx = (page_no - 1) * page_size
+        end_idx = start_idx + page_size
+        
+        st.caption(f"Showing {start_idx + 1}–{min(end_idx, total_rows)} of {total_rows} records. You can edit cells directly in the table below and click 'Save Changes'.")
+        
+        current_page_df = display_df.iloc[start_idx:end_idx]
+        
+        edited_df = st.data_editor(
+            current_page_df, 
+            use_container_width=True,
+            disabled=["ID", "Search Page Number", "Insert Data Time"],
+            hide_index=True
+        )
+        
+        if st.button("Save Changes"):
+            changes_made = 0
+            for i in range(len(current_page_df)):
+                orig = current_page_df.iloc[i]
+                new = edited_df.iloc[i]
+                if (orig["Website Link"] != new["Website Link"] or 
+                    orig["Category"] != new["Category"] or 
+                    orig["Location"] != new["Location"]):
+                    
+                    execute_db(
+                        "UPDATE website_links SET website=?, website_normalized=?, category=?, location=? WHERE id=?",
+                        (
+                            new["Website Link"],
+                            normalize_url(new["Website Link"]),
+                            new["Category"],
+                            new["Location"],
+                            int(new["ID"])
+                        )
+                    )
+                    changes_made += 1
+            if changes_made > 0:
+                st.success(f"Saved {changes_made} changes!")
+                st.rerun()
+            else:
+                st.info("No changes detected.")
+        
+        csv = display_df.to_csv(index=False).encode("utf-8")
+        st.download_button(label="⬇️ Download ALL results as CSV", data=csv, file_name="website_links.csv", mime="text/csv")
+
+elif page == "Logs":
+    st.title("📝 System Logs")
+    if os.path.exists('app_search.log'):
+        with open('app_search.log', 'r') as f:
+            logs = f.readlines()
+        st.text_area("app_search.log", "".join(logs[-100:]), height=600) # show last 100 lines
+        if st.button("Clear Logs"):
+            open('app_search.log', 'w').close()
+            st.rerun()
+    else:
+        st.info("Log file not found or empty.")

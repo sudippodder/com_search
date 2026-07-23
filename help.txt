@@ -5,3 +5,165 @@ com_search
 
 
 Search Query/ company details from google > website url > extract emails, phone numbers, address, whatsapp number if available from the website
+
+
+I need a different page where I can add all my category for search(Like real state company, SEO agency, Digital marketing agency, etc) and location(like kolkata,mumbai, etc) ,can add multiple location together.
+
+There will be a search area where search will be done using 
+category + location
+like "real state company in kolkata" and many more can be added.
+
+all website link will be store into the DB.
+
+there will be a setting area where I can add how many page will be search with one category.
+
+Search will be done in automated process, like when app will running search will be run after 20min or 30min (I need a setting area for that)
+
+Search API should be use Serper.dev
+
+I need a log file if any issue occur(and that should be show in notification)
+
+Website link should be unique(same website shouldn't be store twice, use only one url not multiple if exist).
+
+
+When all category search are completed then the search process will be stopped.
+
+The search page need to set in setting area. when search with each category and location , page 1 -page 2 -page3 search will be done automatically (which page no is set on settings)
+
+
+
+
+
+
+
+I need only website link on search result on automated and manual both.
+Search list page will be there. On that page there will be only website link , category, location(which page no search done), insert data time.  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	Healthcare Clinics & Hospitals	Patient management, appointments, telemedicine
+	Real Estate Agencies	CRM, property portals, mobile apps
+	Logistics & Transportation	Fleet management, GPS tracking
+	Manufacturing	ERP, inventory, production software
+	E-commerce Brands	Online stores, mobile apps, automation
+	Construction Companies	Project management, ERP
+	Financial Services	FinTech apps, dashboards
+	Law Firms	Case management software
+	Education Institutes	LMS, student portals
+	Travel Agencies	Booking systems
+	Restaurants & Cafes	Ordering & delivery apps
+	Hotels & Resorts	Booking engines
+	Beauty Salons & Spas	Appointment apps
+	Fitness & Gym	Membership software
+	Car Dealers	Inventory & CRM
+	Auto Repair Shops	Booking software
+	Recruitment Agencies	ATS systems
+	Insurance Agencies	CRM & claim management
+	Marketing Agencies	Client portals
+	Accounting Firms	Client dashboard
+	Event Management	Booking platforms
+	Cleaning Companies	Scheduling software
+	Pest Control	Service management
+	Home Services	Booking apps
+	Medical Laboratories	Lab management
+	Pharmacies	Inventory & ordering
+	NGOs	Donation platforms
+	Universities	ERP
+	Coaching Centers	Learning apps
+	Warehouses
+
+
+
+    🇺🇸 USA	
+🇨🇦 Canada	
+🇬🇧 UK	
+🇦🇺 Australia	
+🇩🇪 Germany	
+🇳🇱 Netherlands	
+🇸🇪 Sweden	
+🇳🇴 Norway	
+🇨🇭 Switzerland	
+🇩🇰 Denmark	
+🇫🇷 France	
+🇮🇪 Ireland	
+🇳🇿 New Zealand	
+🇦🇪 UAE	
+🇸🇬 Singapore	
+🇯🇵 Japan	
+🇰🇷 South Korea
+
+
+
+
+
+Toronto
+Vancouver
+Calgary
+Ottawa
+Montreal
+United Kingdom
+London
+Manchester
+Birmingham
+Bristol
+Leeds
+Australia
+Sydney
+Melbourne
+Brisbane
+Perth
+Adelaide
+Germany
+Berlin
+Munich
+Hamburg
+Frankfurt
+Cologne
+UAE
+Dubai
+Abu Dhabi
+Sharjah
+Singapore
+Singapore
+Netherlands
+Amsterdam
+Rotterdam
+Eindhoven
