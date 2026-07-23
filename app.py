@@ -216,6 +216,7 @@ def build_company_records(query: str, num_results: int = 5, sleep_sec: float = 2
         st.write(url)
 
         main_html = fetch_page(url)
+        #st.markdown(f"Fetching main page...{main_html}---{url}")
         if not main_html:
             st.warning("Could not fetch main page.")
             continue
@@ -223,7 +224,7 @@ def build_company_records(query: str, num_results: int = 5, sleep_sec: float = 2
         # collect content from main + contact/about pages
         content = main_html
         extra_links = extract_links(main_html, url)
-
+        st.markdown(f"Fetching main page...{extra_links}")
         st.caption(f"Found {len(extra_links)} contact/about-like pages.")
         for idx, link in enumerate(extra_links[:5], start=1):
             st.caption(f"Fetching extra page {idx}: {link}")
@@ -232,6 +233,7 @@ def build_company_records(query: str, num_results: int = 5, sleep_sec: float = 2
             time.sleep(0.8)  # be nice to servers
 
         # LLM extraction
+        st.markdown(f"Fetching main page...{content}")
         with st.spinner("Extracting contact details with AI..."):
             info = llm_extract_company_info(url, content)
 
