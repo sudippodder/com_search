@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: multi-agent-blog-ai
+    env: python
+    region: oregon
+    plan: free
+    # Build command will upgrade pip, install wheels and requirements, and download spaCy model
+    buildCommand: python -m pip install --upgrade pip setuptools wheel && pip install -r requirements.txt && python -m textblob.download_corpora
+
+    # Use Render's $PORT at runtime
+    startCommand: bash -lc "streamlit run app.py --server.port $PORT --server.address 0.0.0.0"
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PORT
+        value: "10000"
+      - key: HF_TOKEN
+        value: "1"
+      - key: SERPER_API_KEY
+        value: "2"
+      - key: ZEROGPT_API_KEY
+        value: "0" # placeholder - Render will override with runtime $PORT
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: CREWAI_TRACING_ENABLED
+        value: "true"

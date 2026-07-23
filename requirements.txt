@@ -1,6 +1,8 @@
 streamlit
-python-dotenv
-requests
+python-dotenv>=1.0.0
+requests>=2.31.0
 beautifulsoup4
-openai
-pandas
+huggingface_hub
+pandas>=2.2.2
+textblob
+werkzeug>=3.0.0
