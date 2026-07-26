@@ -239,6 +239,12 @@ def search_companies_paged(query: str, target_pages: int = 3, ui_mode=True):
                 link = item.get("link")
                 if link:
                     results.append({"link": link, "page_no": page})
+        except requests.exceptions.HTTPError as e:
+            error_details = resp.text
+            msg = f"Search API error on page {page}: {e} - Details: {error_details}"
+            if ui_mode: st.error(msg)
+            logger.error(msg)
+            raise RuntimeError(f"API_ERROR: {error_details}")
         except Exception as e:
             msg = f"Search API error on page {page}: {e}"
             if ui_mode: st.error(msg)
@@ -324,27 +330,36 @@ def background_search_worker():
                 # Get settings
                 pages = int(get_setting('search_pages', '3'))
                 
-                records = build_website_links(category, location, target_pages=pages, ui_mode=False)
-                
-                if records:
-                    inserted, skipped = save_links_to_db(records)
-                    logger.info(f"Completed {category} in {location}. Inserted: {inserted}, Skipped: {skipped}")
-                else:
-                    logger.info(f"'{category} in {location}' returned no valid records.")
+                try:
+                    records = build_website_links(category, location, target_pages=pages, ui_mode=False)
                     
-                # Mark as completed
-                execute_db("UPDATE search_queue SET status = 'completed' WHERE id = ?", (task_id,))
-                
-                # Check if queue is empty now
-                remaining = fetch_db_one("SELECT COUNT(*) FROM search_queue WHERE status = 'pending'")
-                if remaining and remaining[0] == 0:
-                    logger.info("All category searches are completed. Stopping process.")
-                    update_setting('is_running', 'false')
+                    if records:
+                        inserted, skipped = save_links_to_db(records)
+                        logger.info(f"Completed {category} in {location}. Inserted: {inserted}, Skipped: {skipped}")
+                    else:
+                        logger.info(f"'{category} in {location}' returned no valid records.")
+                        
+                    # Mark as completed
+                    execute_db("UPDATE search_queue SET status = 'completed' WHERE id = ?", (task_id,))
                     
-                # Sleep for configured interval
-                interval = int(get_setting('interval_minutes', '20'))
-                logger.info(f"Sleeping for {interval} minutes before next task.")
-                time.sleep(interval * 60)
+                    # Check if queue is empty now
+                    remaining = fetch_db_one("SELECT COUNT(*) FROM search_queue WHERE status = 'pending'")
+                    if remaining and remaining[0] == 0:
+                        logger.info("All category searches are completed. Stopping process.")
+                        update_setting('is_running', 'false')
+                        
+                    # Sleep for configured interval
+                    interval = int(get_setting('interval_minutes', '20'))
+                    logger.info(f"Sleeping for {interval} minutes before next task.")
+                    time.sleep(interval * 60)
+                except RuntimeError as e:
+                    if "API_ERROR" in str(e):
+                        logger.error(f"Stopping automated search due to API error: {e}")
+                        update_setting('is_running', 'false')
+                        execute_db("UPDATE search_queue SET status = 'pending' WHERE id = ?", (task_id,))
+                        time.sleep(10)
+                    else:
+                        raise e
             else:
                 # No tasks but running? Stop it.
                 update_setting('is_running', 'false')
@@ -434,7 +449,14 @@ if page == "Manual Search":
             st.error("Please enter both a Category and Location.")
         else:
             with st.spinner("Extracting links..."):
-                records = build_website_links(manual_cat, manual_loc, target_pages=num_pages, ui_mode=True)
+                try:
+                    records = build_website_links(manual_cat, manual_loc, target_pages=num_pages, ui_mode=True)
+                except RuntimeError as e:
+                    if "API_ERROR" in str(e):
+                        st.error("Search stopped due to an API error (e.g. Not enough credits). Check the logs.")
+                        records = []
+                    else:
+                        raise e
             if not records:
                 st.warning("No links extracted. Try another query or increase results.")
             else:
